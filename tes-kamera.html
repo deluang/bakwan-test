@@ -29,7 +29,7 @@ p { margin: 0; }
 .muted { color: var(--muted); font-size: 13px; }
 .stage { position: relative; width: 100%; aspect-ratio: 3 / 4; background: #000; border-radius: 10px; overflow: hidden; touch-action: none; }
 .stage video, .stage img.ref, .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.stage img.ref { opacity: .4; pointer-events: none; }
+.stage img.ref, .stage canvas.edges { opacity: .4; pointer-events: none; }
 .stage .placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: #cfc6ba; text-align: center; padding: 24px; }
 .ratio { position: absolute; left: 8px; top: 8px; background: rgba(0,0,0,.6); color: #fff; font: 600 14px var(--mono); padding: 4px 8px; border-radius: 6px; }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -61,6 +61,7 @@ td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-word; }
   <div class="stage" id="stage">
     <video id="video" playsinline muted autoplay></video>
     <img class="ref" id="ref" alt="" hidden>
+    <canvas class="edges" id="edges" hidden></canvas>
     <canvas id="overlay"></canvas>
     <div class="ratio" id="ratio" hidden></div>
     <div class="placeholder" id="ph">Tekan "Nyalakan kamera" lalu izinkan akses kamera.</div>
@@ -78,6 +79,13 @@ td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-word; }
     <button id="btnLock" disabled>Kunci exposure/fokus/WB</button>
     <button id="btnShot" disabled>Ambil foto</button>
     <button id="btnRef" disabled>Jadikan referensi</button>
+  </div>
+  <div class="row">
+    <label for="refMode">Overlay
+      <select id="refMode"><option value="photo">foto penuh</option><option value="edges" selected>garis tepi saja</option></select>
+    </label>
+    <label for="edgeLevel">Ketegasan tepi <input type="range" id="edgeLevel" min="5" max="60" value="20"></label>
+    <label for="edgeBand"><input type="checkbox" id="edgeBand" checked> Hanya area toples (antara garis)</label>
   </div>
   <div class="row">
     <label for="opacity">Transparansi referensi <input type="range" id="opacity" min="0" max="100" value="40"></label>
@@ -109,7 +117,8 @@ td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-word; }
 
 <script>
 const $ = id => document.getElementById(id);
-const video = $('video'), overlay = $('overlay'), ref = $('ref'), stage = $('stage');
+const video = $('video'), overlay = $('overlay'), ref = $('ref'), stage = $('stage'), edgesCv = $('edges');
+let refFrame = null; // {gray, w, h} dari frame video saat dijadikan referensi
 let stream = null, track = null, imageCapture = null, lastBlobUrl = null;
 const report = { ua: navigator.userAgent };
 const lines = { rim: 0.2, level: 0.55, base: 0.85 };
@@ -182,10 +191,11 @@ overlay.addEventListener('pointermove', e => {
   const r = overlay.getBoundingClientRect();
   lines[dragging] = Math.min(0.99, Math.max(0.01, (e.clientY - r.top) / r.height));
   drawOverlay();
+  if (refFrame && $('edgeBand').checked) renderEdges();
 });
 overlay.addEventListener('pointerup', () => { dragging = null; });
 window.addEventListener('resize', resizeOverlay);
-$('opacity').addEventListener('input', e => { ref.style.opacity = e.target.value / 100; });
+$('opacity').addEventListener('input', e => { ref.style.opacity = edgesCv.style.opacity = e.target.value / 100; });
 
 // ---------- kamera ----------
 $('btnStart').addEventListener('click', async () => {
@@ -203,7 +213,7 @@ $('btnStart').addEventListener('click', async () => {
   $('ph').hidden = true;
   track = stream.getVideoTracks()[0];
   log('Kamera aktif: ' + track.label);
-  ['btnLock', 'btnShot'].forEach(id => $(id).disabled = false);
+  ['btnLock', 'btnShot', 'btnRef'].forEach(id => $(id).disabled = false);
   $('btnStart').disabled = true;
   resizeOverlay();
   await inspectTrack();
@@ -310,19 +320,122 @@ $('btnShot').addEventListener('click', async () => {
     $('shot').replaceChildren(img, Object.assign(document.createElement('p'), { className: 'muted', textContent: info }));
     setRow('last_shot', 'Foto terakhir', info);
     log('Foto diambil', { method, width: img.naturalWidth, height: img.naturalHeight, kb: Math.round(blob.size / 1024), ms: Math.round(ms) });
-    $('btnRef').disabled = false;
   } catch (err) {
     log('Gagal ambil foto: ' + err.message);
   } finally { $('btnShot').disabled = false; }
 });
 
+// Referensi diambil dari frame video, supaya framing-nya persis sama dengan preview.
 $('btnRef').addEventListener('click', () => {
-  ref.src = lastBlobUrl;
-  ref.hidden = false;
-  ref.style.opacity = $('opacity').value / 100;
-  lastBlobUrl = null; // jangan di-revoke selama dipakai sebagai referensi
-  log('Foto terakhir dijadikan referensi overlay');
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const c = document.createElement('canvas');
+  c.width = vw; c.height = vh;
+  c.getContext('2d').drawImage(video, 0, 0);
+  ref.src = c.toDataURL('image/jpeg', 0.85);
+  // Versi kecil untuk deteksi tepi (cepat di HP)
+  const w = Math.min(640, vw), h = Math.round(vh * w / vw);
+  const s = document.createElement('canvas');
+  s.width = w; s.height = h;
+  const sctx = s.getContext('2d');
+  sctx.drawImage(video, 0, 0, w, h);
+  const px = sctx.getImageData(0, 0, w, h).data;
+  const gray = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) gray[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
+  refFrame = { gray, w, h };
+  applyRefMode();
+  log('Frame sekarang dijadikan referensi', { w: vw, h: vh });
 });
+
+function applyRefMode() {
+  if (!refFrame) return;
+  const edges = $('refMode').value === 'edges';
+  ref.hidden = edges;
+  edgesCv.hidden = !edges;
+  ref.style.opacity = edgesCv.style.opacity = $('opacity').value / 100;
+  if (edges) renderEdges();
+}
+$('refMode').addEventListener('change', applyRefMode);
+$('edgeLevel').addEventListener('input', () => refFrame && renderEdges());
+$('edgeBand').addEventListener('change', () => refFrame && renderEdges());
+
+function renderEdges() {
+  const { gray, w, h } = refFrame;
+  const t0 = performance.now();
+  const hi = Number($('edgeLevel').value) / 100;
+  const edge = canny(gray, w, h, hi * 0.5, hi);
+  let y0 = 0, y1 = h;
+  if ($('edgeBand').checked) {
+    const pad = 0.04;
+    y0 = Math.floor(Math.max(0, Math.min(lines.rim, lines.base) - pad) * h);
+    y1 = Math.ceil(Math.min(1, Math.max(lines.rim, lines.base) + pad) * h);
+  }
+  edgesCv.width = w; edgesCv.height = h;
+  const ctx = edgesCv.getContext('2d');
+  const out = ctx.createImageData(w, h);
+  let n = 0;
+  for (let y = y0; y < y1; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (!edge[i]) continue;
+    n++;
+    // tebalkan 1 px supaya terlihat di layar HP
+    for (const j of [i, i + 1, i + w]) {
+      if (j >= w * h) continue;
+      out.data[j * 4] = 80; out.data[j * 4 + 1] = 255; out.data[j * 4 + 2] = 170; out.data[j * 4 + 3] = 255;
+    }
+  }
+  ctx.putImageData(out, 0, 0);
+  edgesCv.style.opacity = 1; // garis tepi terlihat lebih jelas tanpa transparansi
+  report.edges = { w, h, threshold: hi, pixels: n, ms: Math.round(performance.now() - t0) };
+  setRow('edges', 'Deteksi tepi', `${w}×${h}, ${n} piksel tepi, ${report.edges.ms} ms`);
+}
+
+// Canny sederhana: blur Gaussian, Sobel, non-maximum suppression, hysteresis.
+function canny(gray, w, h, lo, hi) {
+  const k = [1, 4, 6, 4, 1];
+  const tmp = new Float32Array(w * h), blur = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let a = 0;
+    for (let d = -2; d <= 2; d++) a += k[d + 2] * gray[y * w + Math.min(w - 1, Math.max(0, x + d))];
+    tmp[y * w + x] = a / 16;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let a = 0;
+    for (let d = -2; d <= 2; d++) a += k[d + 2] * tmp[Math.min(h - 1, Math.max(0, y + d)) * w + x];
+    blur[y * w + x] = a / 16;
+  }
+  const mag = new Float32Array(w * h), dir = new Uint8Array(w * h);
+  let max = 0;
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x, p = j => blur[j];
+    const gx = -p(i - w - 1) - 2 * p(i - 1) - p(i + w - 1) + p(i - w + 1) + 2 * p(i + 1) + p(i + w + 1);
+    const gy = -p(i - w - 1) - 2 * p(i - w) - p(i - w + 1) + p(i + w - 1) + 2 * p(i + w) + p(i + w + 1);
+    const m = Math.hypot(gx, gy);
+    mag[i] = m; if (m > max) max = m;
+    let a = Math.atan2(gy, gx) * 180 / Math.PI; if (a < 0) a += 180;
+    dir[i] = a < 22.5 || a >= 157.5 ? 0 : a < 67.5 ? 1 : a < 112.5 ? 2 : 3;
+  }
+  const hiT = hi * max, loT = lo * max;
+  const nms = new Float32Array(w * h);
+  const off = [[1, -1], [w + 1, -w - 1], [w, -w], [w - 1, -w + 1]];
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x, m = mag[i];
+    if (m < loT) continue;
+    const [a, b] = off[dir[i]];
+    if (m >= mag[i + a] && m >= mag[i + b]) nms[i] = m;
+  }
+  const out = new Uint8Array(w * h), stack = [];
+  for (let i = 0; i < w * h; i++) if (nms[i] >= hiT && !out[i]) {
+    out[i] = 1; stack.push(i);
+    while (stack.length) {
+      const j = stack.pop();
+      for (const d of [-w - 1, -w, -w + 1, -1, 1, w - 1, w, w + 1]) {
+        const q = j + d;
+        if (q >= 0 && q < w * h && !out[q] && nms[q] >= loT) { out[q] = 1; stack.push(q); }
+      }
+    }
+  }
+  return out;
+}
 
 $('btnCopy').addEventListener('click', async () => {
   report.lines = lines;
