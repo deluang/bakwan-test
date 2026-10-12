@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Tes Kamera BAKWAN</title>
+<style>
+/* Layout: satu kolom, preview kamera di atas, panel hasil di bawah */
+:root {
+  --bg: #f6f4ef; --surface: #ffffff; --fg: #2a2520; --muted: #6f665c;
+  --line: #ddd6cb; --accent: #b5651d; --ok: #2f7d4a; --bad: #b3362b;
+  --base: #2b7bd6; --level: #e0a100; --rim: #d1405a;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #1a1714; --surface: #24201c; --fg: #efe8de; --muted: #a59a8d;
+    --line: #3a342e; --accent: #e08a3c; --ok: #5cbf7d; --bad: #ef6d61; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  padding: max(12px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+main { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+p { margin: 0; }
+.muted { color: var(--muted); font-size: 13px; }
+.stage { position: relative; width: 100%; aspect-ratio: 3 / 4; background: #000; border-radius: 10px; overflow: hidden; touch-action: none; }
+.stage video, .stage img.ref, .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.stage img.ref { opacity: .4; pointer-events: none; }
+.stage .placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: #cfc6ba; text-align: center; padding: 24px; }
+.ratio { position: absolute; left: 8px; top: 8px; background: rgba(0,0,0,.6); color: #fff; font: 600 14px var(--mono); padding: 4px 8px; border-radius: 6px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button { font: inherit; font-weight: 600; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+label { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+section { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+td { padding: 5px 4px; border-top: 1px solid var(--line); vertical-align: top; }
+td:first-child { color: var(--muted); width: 45%; }
+td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-word; }
+.yes { color: var(--ok); font-weight: 600; } .no { color: var(--bad); font-weight: 600; }
+.log { font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; margin: 0; }
+.shot { display: flex; gap: 10px; align-items: flex-start; }
+.shot img { width: 96px; border-radius: 6px; }
+.legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 13px; }
+.legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>Tes Kamera BAKWAN</h1>
+    <p class="muted">Cek apakah browser HP ini bisa menampilkan overlay di atas kamera, mengunci exposure/fokus/white balance, dan mengambil foto resolusi penuh.</p>
+  </div>
+
+  <div class="stage" id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <img class="ref" id="ref" alt="" hidden>
+    <canvas id="overlay"></canvas>
+    <div class="ratio" id="ratio" hidden></div>
+    <div class="placeholder" id="ph">Tekan "Nyalakan kamera" lalu izinkan akses kamera.</div>
+  </div>
+
+  <div class="legend">
+    <span><i style="background:var(--rim)"></i>bibir toples</span>
+    <span><i style="background:var(--level)"></i>permukaan starter</span>
+    <span><i style="background:var(--base)"></i>dasar dalam toples</span>
+    <span class="muted">Geser garis dengan jari.</span>
+  </div>
+
+  <div class="row">
+    <button class="primary" id="btnStart">Nyalakan kamera</button>
+    <button id="btnLock" disabled>Kunci exposure/fokus/WB</button>
+    <button id="btnShot" disabled>Ambil foto</button>
+    <button id="btnRef" disabled>Jadikan referensi</button>
+  </div>
+  <div class="row">
+    <label for="opacity">Transparansi referensi <input type="range" id="opacity" min="0" max="100" value="40"></label>
+    <label for="method">Cara ambil foto
+      <select id="method"><option value="auto">otomatis</option><option value="takePhoto">takePhoto</option><option value="grabFrame">grabFrame</option><option value="canvas">canvas dari video</option></select>
+    </label>
+  </div>
+
+  <section>
+    <h2>Dukungan browser</h2>
+    <table id="support"><tbody></tbody></table>
+  </section>
+
+  <section>
+    <h2>Foto terakhir</h2>
+    <div class="shot" id="shot"><p class="muted">Belum ada foto.</p></div>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <pre class="log" id="log"></pre>
+    <div class="row" style="margin-top:10px">
+      <button id="btnCopy">Salin hasil tes</button>
+      <span class="muted" id="copyMsg"></span>
+    </div>
+    <p class="muted" style="margin-top:6px">Tempel hasilnya di thread supaya bisa dibandingkan antar HP.</p>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video'), overlay = $('overlay'), ref = $('ref'), stage = $('stage');
+let stream = null, track = null, imageCapture = null, lastBlobUrl = null;
+const report = { ua: navigator.userAgent };
+const lines = { rim: 0.2, level: 0.55, base: 0.85 };
+const colors = { rim: '--rim', level: '--level', base: '--base' };
+
+function log(msg, obj) {
+  const t = new Date().toLocaleTimeString('id-ID');
+  const s = obj === undefined ? msg : msg + ' ' + JSON.stringify(obj);
+  $('log').textContent += `[${t}] ${s}\n`;
+  $('log').scrollTop = 1e9;
+}
+
+function setRow(key, label, value, good) {
+  const tb = $('support').tBodies[0];
+  let tr = tb.querySelector(`tr[data-k="${key}"]`);
+  if (!tr) { tr = tb.insertRow(); tr.dataset.k = key; tr.insertCell(); tr.insertCell().className = 'v'; }
+  tr.cells[0].textContent = label;
+  tr.cells[1].textContent = value;
+  tr.cells[1].classList.toggle('yes', good === true);
+  tr.cells[1].classList.toggle('no', good === false);
+  report[key] = value;
+}
+
+function staticSupport() {
+  setRow('secure', 'Koneksi aman (HTTPS)', window.isSecureContext ? 'ya' : 'tidak', window.isSecureContext);
+  setRow('gum', 'getUserMedia', navigator.mediaDevices?.getUserMedia ? 'ada' : 'tidak ada', !!navigator.mediaDevices?.getUserMedia);
+  setRow('ic', 'ImageCapture API', 'ImageCapture' in window ? 'ada' : 'tidak ada', 'ImageCapture' in window);
+  const sc = navigator.mediaDevices?.getSupportedConstraints?.() || {};
+  const want = ['exposureMode','exposureTime','exposureCompensation','iso','focusMode','focusDistance','pointsOfInterest','whiteBalanceMode','colorTemperature','zoom','torch'];
+  const have = want.filter(k => sc[k]);
+  setRow('supported', 'Constraint yang dikenal browser', have.length ? have.join(', ') : '(tidak ada)', have.length > 0 ? undefined : false);
+}
+
+// ---------- overlay ----------
+function resizeOverlay() {
+  const r = stage.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  overlay.width = r.width * dpr; overlay.height = r.height * dpr;
+  drawOverlay();
+}
+function drawOverlay() {
+  const ctx = overlay.getContext('2d');
+  const w = overlay.width, h = overlay.height, dpr = window.devicePixelRatio || 1;
+  ctx.clearRect(0, 0, w, h);
+  const cs = getComputedStyle(document.documentElement);
+  for (const k of Object.keys(lines)) {
+    const y = lines[k] * h;
+    ctx.strokeStyle = cs.getPropertyValue(colors[k]).trim();
+    ctx.lineWidth = 3 * dpr;
+    ctx.setLineDash(k === 'level' ? [] : [10 * dpr, 6 * dpr]);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.beginPath(); ctx.arc(w - 22 * dpr, y, 9 * dpr, 0, Math.PI * 2); ctx.fill();
+  }
+  const ratio = (lines.base - lines.level) / (lines.base - lines.rim);
+  const el = $('ratio');
+  el.hidden = !stream;
+  el.textContent = `tinggi ${(ratio * 100).toFixed(1)}% dari toples`;
+}
+let dragging = null;
+overlay.addEventListener('pointerdown', e => {
+  const r = overlay.getBoundingClientRect();
+  const y = (e.clientY - r.top) / r.height;
+  let best = null, bd = 0.08;
+  for (const k of Object.keys(lines)) { const d = Math.abs(lines[k] - y); if (d < bd) { bd = d; best = k; } }
+  if (best) { dragging = best; overlay.setPointerCapture(e.pointerId); }
+});
+overlay.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const r = overlay.getBoundingClientRect();
+  lines[dragging] = Math.min(0.99, Math.max(0.01, (e.clientY - r.top) / r.height));
+  drawOverlay();
+});
+overlay.addEventListener('pointerup', () => { dragging = null; });
+window.addEventListener('resize', resizeOverlay);
+$('opacity').addEventListener('input', e => { ref.style.opacity = e.target.value / 100; });
+
+// ---------- kamera ----------
+$('btnStart').addEventListener('click', async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } }, audio: false
+    });
+  } catch (err) {
+    log('Gagal membuka kamera: ' + err.name + ' ' + err.message);
+    $('ph').textContent = 'Kamera tidak bisa dibuka: ' + err.name + '. Pastikan halaman dibuka lewat https dan akses kamera diizinkan.';
+    return;
+  }
+  video.srcObject = stream;
+  await video.play().catch(() => {});
+  $('ph').hidden = true;
+  track = stream.getVideoTracks()[0];
+  log('Kamera aktif: ' + track.label);
+  ['btnLock', 'btnShot'].forEach(id => $(id).disabled = false);
+  $('btnStart').disabled = true;
+  resizeOverlay();
+  await inspectTrack();
+});
+
+function fmt(v) {
+  if (v === undefined) return '-';
+  if (Array.isArray(v)) return v.join(' / ') || '(kosong)';
+  if (typeof v === 'object' && v) return 'min ' + v.min + ', maks ' + v.max + (v.step ? ', step ' + v.step : '');
+  return String(v);
+}
+
+async function inspectTrack() {
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  const set = track.getSettings();
+  const strip = o => { const { deviceId, groupId, ...rest } = o; return rest; };
+  report.capabilities = strip(caps); report.settings = strip(set);
+  setRow('res', 'Resolusi preview', `${set.width}×${set.height}`);
+  const modes = k => caps[k] || [];
+  const canLock = k => modes(k).some(m => m === 'manual' || m === 'single-shot');
+  setRow('cap_exp', 'Mode exposure', fmt(caps.exposureMode), caps.exposureMode ? canLock('exposureMode') : false);
+  setRow('cap_foc', 'Mode fokus', fmt(caps.focusMode), caps.focusMode ? canLock('focusMode') : false);
+  setRow('cap_wb', 'Mode white balance', fmt(caps.whiteBalanceMode), caps.whiteBalanceMode ? canLock('whiteBalanceMode') : false);
+  setRow('cap_et', 'Waktu exposure', fmt(caps.exposureTime));
+  setRow('cap_iso', 'ISO', fmt(caps.iso));
+  setRow('cap_ec', 'Kompensasi exposure', fmt(caps.exposureCompensation));
+  setRow('cap_zoom', 'Zoom', fmt(caps.zoom));
+  setRow('cap_torch', 'Senter', caps.torch ? 'ada' : 'tidak ada');
+  log('getCapabilities', strip(caps));
+  log('getSettings', strip(set));
+  if ('ImageCapture' in window) {
+    imageCapture = new ImageCapture(track);
+    try {
+      const pc = await imageCapture.getPhotoCapabilities();
+      const pw = pc.imageWidth, ph = pc.imageHeight;
+      setRow('photo_res', 'Resolusi foto maks (takePhoto)', pw && ph ? `${pw.max}×${ph.max}` : '-');
+      report.photoCapabilities = { imageWidth: pw, imageHeight: ph, fillLightMode: pc.fillLightMode, redEyeReduction: pc.redEyeReduction };
+      log('getPhotoCapabilities', report.photoCapabilities);
+    } catch (err) { log('getPhotoCapabilities gagal: ' + err.message); }
+  }
+}
+
+$('btnLock').addEventListener('click', async () => {
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  const before = track.getSettings();
+  const results = {};
+  for (const k of ['exposureMode', 'focusMode', 'whiteBalanceMode']) {
+    const modes = caps[k] || [];
+    const mode = modes.includes('manual') ? 'manual' : modes.includes('single-shot') ? 'single-shot' : null;
+    if (!mode) { results[k] = 'tidak bisa dikunci'; continue; }
+    const c = { [k]: mode };
+    // Pertahankan nilai saat ini supaya mode manual tidak melompat
+    if (k === 'exposureMode' && mode === 'manual') {
+      if (before.exposureTime) c.exposureTime = before.exposureTime;
+      if (before.iso) c.iso = before.iso;
+    }
+    if (k === 'focusMode' && mode === 'manual' && before.focusDistance) c.focusDistance = before.focusDistance;
+    if (k === 'whiteBalanceMode' && mode === 'manual' && before.colorTemperature) c.colorTemperature = before.colorTemperature;
+    try {
+      await track.applyConstraints({ advanced: [c] });
+      const now = track.getSettings()[k];
+      results[k] = now === mode ? `terkunci (${mode})` : `diminta ${mode}, sekarang ${now ?? 'tidak dilaporkan'}`;
+    } catch (err) { results[k] = 'gagal: ' + err.name; }
+  }
+  setRow('lock_exp', 'Hasil kunci exposure', results.exposureMode, /^terkunci/.test(results.exposureMode));
+  setRow('lock_foc', 'Hasil kunci fokus', results.focusMode, /^terkunci/.test(results.focusMode));
+  setRow('lock_wb', 'Hasil kunci white balance', results.whiteBalanceMode, /^terkunci/.test(results.whiteBalanceMode));
+  log('Kunci kamera', results);
+  const { deviceId, groupId, ...after } = track.getSettings();
+  report.settingsAfterLock = after;
+  log('getSettings setelah dikunci', after);
+});
+
+async function capture(method) {
+  const t0 = performance.now();
+  if ((method === 'auto' || method === 'takePhoto') && imageCapture) {
+    try { const blob = await imageCapture.takePhoto(); return { blob, method: 'takePhoto', ms: performance.now() - t0 }; }
+    catch (err) { log('takePhoto gagal: ' + err.name + ' ' + err.message); if (method === 'takePhoto') throw err; }
+  }
+  if ((method === 'auto' || method === 'grabFrame') && imageCapture) {
+    try {
+      const bmp = await imageCapture.grabFrame();
+      const c = new OffscreenCanvas(bmp.width, bmp.height); c.getContext('2d').drawImage(bmp, 0, 0);
+      return { blob: await c.convertToBlob({ type: 'image/jpeg', quality: 0.92 }), method: 'grabFrame', ms: performance.now() - t0 };
+    } catch (err) { log('grabFrame gagal: ' + err.name + ' ' + err.message); if (method === 'grabFrame') throw err; }
+  }
+  const c = document.createElement('canvas');
+  c.width = video.videoWidth; c.height = video.videoHeight;
+  c.getContext('2d').drawImage(video, 0, 0);
+  const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
+  return { blob, method: 'canvas dari video', ms: performance.now() - t0 };
+}
+
+$('btnShot').addEventListener('click', async () => {
+  $('btnShot').disabled = true;
+  try {
+    const { blob, method, ms } = await capture($('method').value);
+    if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+    lastBlobUrl = URL.createObjectURL(blob);
+    const img = new Image();
+    img.src = lastBlobUrl;
+    await img.decode().catch(() => {});
+    const info = `${method}: ${img.naturalWidth}×${img.naturalHeight}, ${(blob.size / 1024).toFixed(0)} KB, ${ms.toFixed(0)} ms`;
+    $('shot').replaceChildren(img, Object.assign(document.createElement('p'), { className: 'muted', textContent: info }));
+    setRow('last_shot', 'Foto terakhir', info);
+    log('Foto diambil', { method, width: img.naturalWidth, height: img.naturalHeight, kb: Math.round(blob.size / 1024), ms: Math.round(ms) });
+    $('btnRef').disabled = false;
+  } catch (err) {
+    log('Gagal ambil foto: ' + err.message);
+  } finally { $('btnShot').disabled = false; }
+});
+
+$('btnRef').addEventListener('click', () => {
+  ref.src = lastBlobUrl;
+  ref.hidden = false;
+  ref.style.opacity = $('opacity').value / 100;
+  lastBlobUrl = null; // jangan di-revoke selama dipakai sebagai referensi
+  log('Foto terakhir dijadikan referensi overlay');
+});
+
+$('btnCopy').addEventListener('click', async () => {
+  report.lines = lines;
+  const text = 'Hasil Tes Kamera BAKWAN\n' + JSON.stringify(report, null, 2);
+  try { await navigator.clipboard.writeText(text); $('copyMsg').textContent = 'Tersalin.'; }
+  catch {
+    $('log').textContent = text;
+    const r = document.createRange(); r.selectNodeContents($('log'));
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    $('copyMsg').textContent = 'Salin manual teks yang terpilih di atas.';
+  }
+});
+
+staticSupport();
+resizeOverlay();
+</script>
+</body>
+</html>
