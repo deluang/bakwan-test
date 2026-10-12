@@ -102,6 +102,7 @@ td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-word; }
       <select id="refMode"><option value="photo">foto penuh</option><option value="edges" selected>garis tepi saja</option></select>
     </label>
     <label for="edgeLevel">Ketegasan tepi <input type="range" id="edgeLevel" min="5" max="60" value="20"></label>
+    <label for="outerOnly"><input type="checkbox" id="outerOnly" checked> Kontur terluar saja</label>
     <label for="edgeBand"><input type="checkbox" id="edgeBand" checked> Hanya area antara garis</label>
     <label for="useMask"><input type="checkbox" id="useMask" disabled> Hanya di dalam toples (mask ML)</label>
   </div>
@@ -138,6 +139,7 @@ td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-word; }
 const $ = id => document.getElementById(id);
 const video = $('video'), overlay = $('overlay'), ref = $('ref'), stage = $('stage'), edgesCv = $('edges');
 let refMask = null; // Uint8Array w*h, 1 = toples (sudah dilebarkan sedikit)
+let refMaskRaw = null; // mask toples apa adanya, satu area yang tersambung ke titik tap
 let segmenter = null, tapMode = false;
 // Preview pakai object-fit: cover, jadi koordinat di layar perlu dipetakan ke koordinat frame.
 function stageToFrame(sx, sy) {
@@ -372,7 +374,7 @@ $('btnRef').addEventListener('click', () => {
   const gray = new Float32Array(w * h);
   for (let i = 0; i < w * h; i++) gray[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
   refFrame = { gray, w, h };
-  refMask = null; $('useMask').checked = false; $('useMask').disabled = true;
+  refMask = refMaskRaw = null; $('useMask').checked = false; $('useMask').disabled = true;
   $('btnMl').disabled = false;
   applyRefMode();
   log('Frame sekarang dijadikan referensi', { w: vw, h: vh });
@@ -389,6 +391,7 @@ function applyRefMode() {
 $('refMode').addEventListener('change', applyRefMode);
 $('edgeLevel').addEventListener('input', () => refFrame && renderEdges());
 $('edgeBand').addEventListener('change', () => refFrame && renderEdges());
+$('outerOnly').addEventListener('change', () => refFrame && renderEdges());
 $('useMask').addEventListener('change', () => refFrame && renderEdges());
 function useMaskOn() { return refMask && $('useMask').checked; }
 
@@ -445,7 +448,9 @@ function segmentAt(sx, sy) {
     if (raw[Math.floor(y * mh / h) * mw + Math.floor(x * mw / w)] === target) { mask[y * w + x] = 1; area++; }
   }
   res.close();
-  refMask = dilate(mask, w, h, 6);
+  const tx = Math.min(w - 1, Math.floor(p.x * w)), ty = Math.min(h - 1, Math.floor(p.y * h));
+  refMaskRaw = fillHoles(mask[ty * w + tx] ? component(mask, w, h, ty * w + tx) : mask, w, h);
+  refMask = dilate(refMaskRaw, w, h, 6);
   $('useMask').disabled = false; $('useMask').checked = true;
   $('refMode').value = 'edges';
   report.ml = { ...report.ml, segmentMs: ms, maskSize: `${mw}x${mh}`, areaPct: +(100 * area / (w * h)).toFixed(1) };
@@ -453,6 +458,61 @@ function segmentAt(sx, sy) {
   $('mlStatus').textContent = `Toples terdeteksi (${report.ml.areaPct}% layar). Kalau salah, tekan "Pilih toples (ML)" lagi dan tap di titik lain.`;
   log('Segmentasi', report.ml);
   applyRefMode();
+}
+
+// Ambil satu area tersambung (4-tetangga) yang memuat titik start
+function component(mask, w, h, start) {
+  const out = new Uint8Array(w * h), stack = [start];
+  out[start] = 1;
+  while (stack.length) {
+    const i = stack.pop(), x = i % w;
+    for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]) {
+      if (j >= 0 && j < w * h && mask[j] && !out[j]) { out[j] = 1; stack.push(j); }
+    }
+  }
+  return out;
+}
+
+// Isi lubang di dalam mask: semua yang tidak tersambung ke tepi gambar dianggap bagian toples
+function fillHoles(mask, w, h) {
+  const outside = new Uint8Array(w * h), stack = [];
+  const push = i => { if (!mask[i] && !outside[i]) { outside[i] = 1; stack.push(i); } };
+  for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+  while (stack.length) {
+    const i = stack.pop(), x = i % w;
+    if (x > 0) push(i - 1); if (x < w - 1) push(i + 1); if (i >= w) push(i - w); if (i < w * (h - 1)) push(i + w);
+  }
+  const out = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) out[i] = outside[i] ? 0 : 1;
+  return out;
+}
+
+// Piksel tepi luar: hanya yang paling kiri/kanan di tiap baris dan paling atas/bawah di tiap kolom
+function outerEnvelope(edge, w, h) {
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    let l = -1, r = -1;
+    for (let x = 0; x < w; x++) if (edge[y * w + x]) { if (l < 0) l = x; r = x; }
+    if (l >= 0) { out[y * w + l] = 1; out[y * w + r] = 1; }
+  }
+  for (let x = 0; x < w; x++) {
+    let t = -1, b = -1;
+    for (let y = 0; y < h; y++) if (edge[y * w + x]) { if (t < 0) t = y; b = y; }
+    if (t >= 0) { out[t * w + x] = 1; out[b * w + x] = 1; }
+  }
+  return out;
+}
+
+// Garis batas mask: piksel di dalam mask yang bertetangga dengan luar mask
+function maskOutline(mask, w, h) {
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (!mask[i]) continue;
+    if (x === 0 || y === 0 || x === w - 1 || y === h - 1 || !mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w]) out[i] = 1;
+  }
+  return out;
 }
 
 function dilate(mask, w, h, r) {
@@ -485,11 +545,20 @@ function renderEdges() {
   edgesCv.width = w; edgesCv.height = h;
   const ctx = edgesCv.getContext('2d');
   const out = ctx.createImageData(w, h);
+  let keep = new Uint8Array(w * h);
+  if ($('outerOnly').checked && useMaskOn()) {
+    // Dengan mask ML, kontur terluar = garis batas mask itu sendiri
+    keep = maskOutline(refMaskRaw, w, h);
+  } else {
+    for (let y = y0; y < y1; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (edge[i] && !(useMaskOn() && !refMask[i])) keep[i] = 1;
+    }
+    if ($('outerOnly').checked) keep = outerEnvelope(keep, w, h);
+  }
   let n = 0;
-  for (let y = y0; y < y1; y++) for (let x = 0; x < w; x++) {
-    const i = y * w + x;
-    if (!edge[i]) continue;
-    if (useMaskOn() && !refMask[i]) continue;
+  for (let i = 0; i < w * h; i++) {
+    if (!keep[i]) continue;
     n++;
     // tebalkan 1 px supaya terlihat di layar HP
     for (const j of [i, i + 1, i + w]) {
