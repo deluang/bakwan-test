@@ -31,6 +31,15 @@ p { margin: 0; }
 .stage video, .stage img.ref, .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .stage img.ref, .stage canvas.edges { opacity: .4; pointer-events: none; }
 .stage .placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: #cfc6ba; text-align: center; padding: 24px; }
+.stage.full { position: fixed; inset: 0; z-index: 50; aspect-ratio: auto; height: 100%; border-radius: 0; }
+.fsbar { position: absolute; left: 0; right: 0; bottom: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;
+  padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px)); background: linear-gradient(transparent, rgba(0,0,0,.65)); }
+.fsbar button { background: rgba(255,255,255,.92); color: #222; border: 0; }
+.fsbar button.shutter { width: 64px; height: 64px; border-radius: 50%; padding: 0; border: 4px solid #fff; background: var(--accent); color: #fff; font-size: 12px; }
+.fsbtn { position: absolute; right: 8px; top: 8px; padding: 6px 10px; font-size: 13px; background: rgba(0,0,0,.6); color: #fff; border: 0; }
+.stage.full .fsbtn { top: calc(8px + env(safe-area-inset-top, 0px)); }
+.stage.full .ratio { top: calc(8px + env(safe-area-inset-top, 0px)); }
+.fsmsg { pointer-events: none; position: absolute; left: 12px; right: 12px; bottom: 100px; color: #fff; text-align: center; font-size: 14px; text-shadow: 0 1px 3px #000; }
 .ratio { position: absolute; left: 8px; top: 8px; background: rgba(0,0,0,.6); color: #fff; font: 600 14px var(--mono); padding: 4px 8px; border-radius: 6px; }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 button { font: inherit; font-weight: 600; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; }
@@ -64,6 +73,13 @@ td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-word; }
     <canvas class="edges" id="edges" hidden></canvas>
     <canvas id="overlay"></canvas>
     <div class="ratio" id="ratio" hidden></div>
+    <button class="fsbtn" id="btnFull">Layar penuh</button>
+    <p class="fsmsg" id="fsMsg" hidden></p>
+    <div class="fsbar" id="fsBar" hidden>
+      <button id="fsRef">Referensi</button>
+      <button class="shutter" id="fsShot">Foto</button>
+      <button id="fsMl">Pilih toples</button>
+    </div>
     <div class="placeholder" id="ph">Tekan "Nyalakan kamera" lalu izinkan akses kamera.</div>
   </div>
 
@@ -546,6 +562,37 @@ $('btnCopy').addEventListener('click', async () => {
     $('copyMsg').textContent = 'Salin manual teks yang terpilih di atas.';
   }
 });
+
+// ---------- layar penuh ----------
+async function setFull(on) {
+  stage.classList.toggle('full', on);
+  $('fsBar').hidden = !on;
+  $('btnFull').textContent = on ? 'Tutup' : 'Layar penuh';
+  document.body.style.overflow = on ? 'hidden' : '';
+  try {
+    if (on && document.documentElement.requestFullscreen && !document.fullscreenElement) await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+    if (!on && document.fullscreenElement) await document.exitFullscreen();
+  } catch (e) { log('Fullscreen browser tidak tersedia, pakai tampilan penuh biasa: ' + e.message); }
+  syncFsButtons();
+  requestAnimationFrame(() => { resizeOverlay(); if (refFrame && $('refMode').value === 'edges') renderEdges(); });
+}
+$('btnFull').addEventListener('click', e => { e.stopPropagation(); setFull(!stage.classList.contains('full')); });
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && stage.classList.contains('full')) setFull(false); });
+$('fsRef').addEventListener('click', () => $('btnRef').click());
+$('fsShot').addEventListener('click', () => $('btnShot').click());
+$('fsMl').addEventListener('click', () => $('btnMl').click());
+function syncFsButtons() {
+  // Hanya ubah kalau berbeda, supaya MutationObserver tidak berputar terus
+  for (const [fs, src] of [['fsRef', 'btnRef'], ['fsShot', 'btnShot'], ['fsMl', 'btnMl']]) {
+    if ($(fs).disabled !== $(src).disabled) $(fs).disabled = $(src).disabled;
+  }
+  const m = $('fsMsg'), text = $('mlStatus').textContent;
+  const hide = !stage.classList.contains('full') || !(tapMode || /Mengunduh|terdeteksi|gagal/.test(text));
+  if (m.hidden !== hide) m.hidden = hide;
+  if (m.textContent !== text) m.textContent = text;
+}
+new MutationObserver(syncFsButtons).observe(document.querySelector('main'), { subtree: true, attributes: true, attributeFilter: ['disabled'] });
+new MutationObserver(syncFsButtons).observe($('mlStatus'), { childList: true, characterData: true, subtree: true });
 
 staticSupport();
 resizeOverlay();
