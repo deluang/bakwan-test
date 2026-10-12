@@ -99,7 +99,7 @@ td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-word; }
   </div>
   <div class="row">
     <label for="refMode">Overlay
-      <select id="refMode"><option value="photo">foto penuh</option><option value="edges" selected>garis tepi saja</option></select>
+      <select id="refMode"><option value="photo">foto penuh</option><option value="edges" selected>garis tepi saja</option><option value="cutout">potongan foto toples (perlu tap toples)</option></select>
     </label>
     <label for="edgeLevel">Ketegasan tepi <input type="range" id="edgeLevel" min="5" max="60" value="20"></label>
     <label for="outerOnly"><input type="checkbox" id="outerOnly" checked> Kontur terluar saja</label>
@@ -108,7 +108,7 @@ td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-word; }
   </div>
   <p class="muted" id="mlStatus">Ambil foto pertama, lalu tap toplesnya. Model ML (sekitar 17 MB) mulai diunduh saat kamera menyala.</p>
   <div class="row">
-    <label for="opacity">Transparansi referensi <input type="range" id="opacity" min="0" max="100" value="40"></label>
+    <label for="opacity">Transparansi referensi <input type="range" id="opacity" min="0" max="100" value="50"></label>
     <label for="method">Cara ambil foto
       <select id="method"><option value="auto">otomatis</option><option value="takePhoto">takePhoto</option><option value="grabFrame">grabFrame</option><option value="canvas">canvas dari video</option></select>
     </label>
@@ -400,7 +400,7 @@ $('btnRef').addEventListener('click', () => {
   const px = sctx.getImageData(0, 0, w, h).data;
   const gray = new Float32Array(w * h);
   for (let i = 0; i < w * h; i++) gray[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
-  refFrame = { gray, w, h, canvas: s };
+  refFrame = { gray, w, h, canvas: s, full: c };
   refLevel = lines.level;
   drawOverlay();
   refMask = refMaskRaw = null; $('useMask').checked = false; $('useMask').disabled = true;
@@ -411,7 +411,7 @@ $('btnRef').addEventListener('click', () => {
 
 function applyRefMode() {
   if (!refFrame) return;
-  const edges = $('refMode').value === 'edges';
+  const edges = $('refMode').value !== 'photo';
   ref.hidden = edges;
   edgesCv.hidden = !edges;
   ref.style.opacity = edgesCv.style.opacity = $('opacity').value / 100;
@@ -503,7 +503,7 @@ function segmentAt(sx, sy) {
     log('Garis bibir dan dasar dipasang dari mask', { rim: +lines.rim.toFixed(3), base: +lines.base.toFixed(3) });
   }
   $('useMask').disabled = false; $('useMask').checked = true;
-  $('refMode').value = 'edges';
+  $('refMode').value = 'cutout';
   report.ml = { ...report.ml, segmentMs: ms, maskSize: `${mw}x${mh}`, areaPct: +(100 * area / (w * h)).toFixed(1) };
   setRow('ml_seg', 'Segmentasi toples', `${ms} ms, mask ${mw}×${mh}, ${report.ml.areaPct}% layar`, true);
   $('mlStatus').textContent = `Toples terdeteksi (${report.ml.areaPct}% layar). Kalau salah, tekan "Pilih toples (ML)" lagi dan tap di titik lain.`;
@@ -581,7 +581,39 @@ function dilate(mask, w, h, r) {
   return out;
 }
 
+// Foto referensi hanya di dalam kontur toples, plus garis konturnya
+function renderCutout() {
+  const { w, h, full } = refFrame;
+  const cw = full.width, ch = full.height;
+  const m = document.createElement('canvas');
+  m.width = w; m.height = h;
+  const mctx = m.getContext('2d'), mimg = mctx.createImageData(w, h);
+  const line = document.createElement('canvas');
+  line.width = w; line.height = h;
+  const lctx = line.getContext('2d'), limg = lctx.createImageData(w, h);
+  const outline = maskOutline(refMaskRaw, w, h);
+  for (let i = 0; i < w * h; i++) {
+    if (refMaskRaw[i]) mimg.data[i * 4 + 3] = 255;
+    if (outline[i]) for (const j of [i, i + 1, i + w]) if (j < w * h) { limg.data[j * 4] = 80; limg.data[j * 4 + 1] = 255; limg.data[j * 4 + 2] = 170; limg.data[j * 4 + 3] = 255; }
+  }
+  mctx.putImageData(mimg, 0, 0);
+  lctx.putImageData(limg, 0, 0);
+  edgesCv.width = cw; edgesCv.height = ch;
+  const ctx = edgesCv.getContext('2d');
+  ctx.drawImage(full, 0, 0);
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.drawImage(m, 0, 0, cw, ch);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(line, 0, 0, cw, ch);
+  edgesCv.style.opacity = $('opacity').value / 100;
+  setRow('edges', 'Overlay', 'potongan foto toples');
+}
+
 function renderEdges() {
+  if ($('refMode').value === 'cutout') {
+    if (refMaskRaw) return renderCutout();
+    $('mlStatus').textContent = 'Potongan foto butuh toples yang sudah di-tap. Sementara ditampilkan garis tepi.';
+  }
   const { gray, w, h } = refFrame;
   const t0 = performance.now();
   const hi = Number($('edgeLevel').value) / 100;
@@ -694,7 +726,7 @@ async function setFull(on) {
     if (!on && document.fullscreenElement) await document.exitFullscreen();
   } catch (e) { log('Fullscreen browser tidak tersedia, pakai tampilan penuh biasa: ' + e.message); }
   syncFsButtons();
-  requestAnimationFrame(() => { resizeOverlay(); if (refFrame && $('refMode').value === 'edges') renderEdges(); });
+  requestAnimationFrame(() => { resizeOverlay(); if (refFrame && $('refMode').value !== 'photo') renderEdges(); });
 }
 $('btnFull').addEventListener('click', e => { e.stopPropagation(); setFull(!stage.classList.contains('full')); });
 document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && stage.classList.contains('full')) setFull(false); });
