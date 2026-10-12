@@ -79,14 +79,17 @@ td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-word; }
     <button id="btnLock" disabled>Kunci exposure/fokus/WB</button>
     <button id="btnShot" disabled>Ambil foto</button>
     <button id="btnRef" disabled>Jadikan referensi</button>
+    <button id="btnMl" disabled>Pilih toples (ML)</button>
   </div>
   <div class="row">
     <label for="refMode">Overlay
       <select id="refMode"><option value="photo">foto penuh</option><option value="edges" selected>garis tepi saja</option></select>
     </label>
     <label for="edgeLevel">Ketegasan tepi <input type="range" id="edgeLevel" min="5" max="60" value="20"></label>
-    <label for="edgeBand"><input type="checkbox" id="edgeBand" checked> Hanya area toples (antara garis)</label>
+    <label for="edgeBand"><input type="checkbox" id="edgeBand" checked> Hanya area antara garis</label>
+    <label for="useMask"><input type="checkbox" id="useMask" disabled> Hanya di dalam toples (mask ML)</label>
   </div>
+  <p class="muted" id="mlStatus">Mode ML: jadikan referensi dulu, lalu tekan "Pilih toples (ML)" dan tap toplesnya di preview. Unduhan pertama sekitar 17 MB.</p>
   <div class="row">
     <label for="opacity">Transparansi referensi <input type="range" id="opacity" min="0" max="100" value="40"></label>
     <label for="method">Cara ambil foto
@@ -118,6 +121,16 @@ td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-word; }
 <script>
 const $ = id => document.getElementById(id);
 const video = $('video'), overlay = $('overlay'), ref = $('ref'), stage = $('stage'), edgesCv = $('edges');
+let refMask = null; // Uint8Array w*h, 1 = toples (sudah dilebarkan sedikit)
+let segmenter = null, tapMode = false;
+// Preview pakai object-fit: cover, jadi koordinat di layar perlu dipetakan ke koordinat frame.
+function stageToFrame(sx, sy) {
+  const r = stage.getBoundingClientRect();
+  const fw = video.videoWidth || r.width, fh = video.videoHeight || r.height;
+  const k = Math.max(r.width / fw, r.height / fh);
+  const dw = fw * k, dh = fh * k;
+  return { x: (sx * r.width + (dw - r.width) / 2) / dw, y: (sy * r.height + (dh - r.height) / 2) / dh };
+}
 let refFrame = null; // {gray, w, h} dari frame video saat dijadikan referensi
 let stream = null, track = null, imageCapture = null, lastBlobUrl = null;
 const report = { ua: navigator.userAgent };
@@ -181,6 +194,7 @@ function drawOverlay() {
 let dragging = null;
 overlay.addEventListener('pointerdown', e => {
   const r = overlay.getBoundingClientRect();
+  if (tapMode && segmenter && refFrame) { segmentAt((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height); return; }
   const y = (e.clientY - r.top) / r.height;
   let best = null, bd = 0.08;
   for (const k of Object.keys(lines)) { const d = Math.abs(lines[k] - y); if (d < bd) { bd = d; best = k; } }
@@ -342,6 +356,8 @@ $('btnRef').addEventListener('click', () => {
   const gray = new Float32Array(w * h);
   for (let i = 0; i < w * h; i++) gray[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
   refFrame = { gray, w, h };
+  refMask = null; $('useMask').checked = false; $('useMask').disabled = true;
+  $('btnMl').disabled = false;
   applyRefMode();
   log('Frame sekarang dijadikan referensi', { w: vw, h: vh });
 });
@@ -357,6 +373,86 @@ function applyRefMode() {
 $('refMode').addEventListener('change', applyRefMode);
 $('edgeLevel').addEventListener('input', () => refFrame && renderEdges());
 $('edgeBand').addEventListener('change', () => refFrame && renderEdges());
+$('useMask').addEventListener('change', () => refFrame && renderEdges());
+function useMaskOn() { return refMask && $('useMask').checked; }
+
+// ---------- ML: MediaPipe Interactive Segmenter (tap sekali pada toples) ----------
+$('btnMl').addEventListener('click', async () => {
+  const st = $('mlStatus');
+  if (!segmenter) {
+    $('btnMl').disabled = true;
+    st.textContent = 'Mengunduh model ML...';
+    const t0 = performance.now();
+    try {
+      const { FilesetResolver, InteractiveSegmenter } = await import('./vendor/mediapipe/vision_bundle.mjs');
+      const fileset = await FilesetResolver.forVisionTasks('./vendor/mediapipe/wasm');
+      const make = delegate => InteractiveSegmenter.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: './models/magic_touch.tflite', delegate },
+        outputCategoryMask: true, outputConfidenceMasks: false
+      });
+      let delegate = 'GPU';
+      try { segmenter = await make('GPU'); } catch (e) { log('GPU gagal, pakai CPU: ' + e.message); delegate = 'CPU'; segmenter = await make('CPU'); }
+      const ms = Math.round(performance.now() - t0);
+      report.ml = { loadMs: ms, delegate };
+      setRow('ml_load', 'Muat model ML', `${ms} ms (${delegate})`, true);
+      log('Model ML siap', report.ml);
+    } catch (err) {
+      st.textContent = 'Model ML gagal dimuat: ' + err.message;
+      setRow('ml_load', 'Muat model ML', 'gagal: ' + err.message, false);
+      $('btnMl').disabled = false;
+      return;
+    }
+    $('btnMl').disabled = false;
+  }
+  tapMode = true;
+  st.textContent = 'Tap bagian tengah toples di preview.';
+});
+
+function segmentAt(sx, sy) {
+  tapMode = false;
+  const { w, h } = refFrame;
+  const p = stageToFrame(sx, sy);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(ref, 0, 0, w, h);
+  const t0 = performance.now();
+  let res;
+  try { res = segmenter.segment(c, { keypoint: { x: p.x, y: p.y } }); }
+  catch (err) { $('mlStatus').textContent = 'Segmentasi gagal: ' + err.message; log('Segmentasi gagal: ' + err.message); return; }
+  const m = res.categoryMask, mw = m.width, mh = m.height, raw = m.getAsUint8Array();
+  const ms = Math.round(performance.now() - t0);
+  // Nilai kategori di titik yang di-tap = kategori toples
+  const target = raw[Math.min(mh - 1, Math.floor(p.y * mh)) * mw + Math.min(mw - 1, Math.floor(p.x * mw))];
+  const mask = new Uint8Array(w * h);
+  let area = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (raw[Math.floor(y * mh / h) * mw + Math.floor(x * mw / w)] === target) { mask[y * w + x] = 1; area++; }
+  }
+  res.close();
+  refMask = dilate(mask, w, h, 6);
+  $('useMask').disabled = false; $('useMask').checked = true;
+  $('refMode').value = 'edges';
+  report.ml = { ...report.ml, segmentMs: ms, maskSize: `${mw}x${mh}`, areaPct: +(100 * area / (w * h)).toFixed(1) };
+  setRow('ml_seg', 'Segmentasi toples', `${ms} ms, mask ${mw}×${mh}, ${report.ml.areaPct}% layar`, true);
+  $('mlStatus').textContent = `Toples terdeteksi (${report.ml.areaPct}% layar). Kalau salah, tekan "Pilih toples (ML)" lagi dan tap di titik lain.`;
+  log('Segmentasi', report.ml);
+  applyRefMode();
+}
+
+function dilate(mask, w, h, r) {
+  const tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let v = 0;
+    for (let d = -r; d <= r && !v; d++) { const xx = x + d; if (xx >= 0 && xx < w) v = mask[y * w + xx]; }
+    tmp[y * w + x] = v;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let v = 0;
+    for (let d = -r; d <= r && !v; d++) { const yy = y + d; if (yy >= 0 && yy < h) v = tmp[yy * w + x]; }
+    out[y * w + x] = v;
+  }
+  return out;
+}
 
 function renderEdges() {
   const { gray, w, h } = refFrame;
@@ -366,8 +462,9 @@ function renderEdges() {
   let y0 = 0, y1 = h;
   if ($('edgeBand').checked) {
     const pad = 0.04;
-    y0 = Math.floor(Math.max(0, Math.min(lines.rim, lines.base) - pad) * h);
-    y1 = Math.ceil(Math.min(1, Math.max(lines.rim, lines.base) + pad) * h);
+    const a = stageToFrame(0.5, Math.min(lines.rim, lines.base)).y, b = stageToFrame(0.5, Math.max(lines.rim, lines.base)).y;
+    y0 = Math.floor(Math.max(0, a - pad) * h);
+    y1 = Math.ceil(Math.min(1, b + pad) * h);
   }
   edgesCv.width = w; edgesCv.height = h;
   const ctx = edgesCv.getContext('2d');
@@ -376,6 +473,7 @@ function renderEdges() {
   for (let y = y0; y < y1; y++) for (let x = 0; x < w; x++) {
     const i = y * w + x;
     if (!edge[i]) continue;
+    if (useMaskOn() && !refMask[i]) continue;
     n++;
     // tebalkan 1 px supaya terlihat di layar HP
     for (const j of [i, i + 1, i + w]) {
