@@ -106,7 +106,7 @@ td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-word; }
     <label for="edgeBand"><input type="checkbox" id="edgeBand" checked> Hanya area antara garis</label>
     <label for="useMask"><input type="checkbox" id="useMask" disabled> Hanya di dalam toples (mask ML)</label>
   </div>
-  <p class="muted" id="mlStatus">Mode ML: jadikan referensi dulu, lalu tekan "Pilih toples (ML)" dan tap toplesnya di preview. Unduhan pertama sekitar 17 MB.</p>
+  <p class="muted" id="mlStatus">Ambil foto pertama, lalu tap toplesnya. Model ML (sekitar 17 MB) mulai diunduh saat kamera menyala.</p>
   <div class="row">
     <label for="opacity">Transparansi referensi <input type="range" id="opacity" min="0" max="100" value="40"></label>
     <label for="method">Cara ambil foto
@@ -234,7 +234,9 @@ function drawOverlay() {
 let dragging = null;
 overlay.addEventListener('pointerdown', e => {
   const r = overlay.getBoundingClientRect();
-  if (tapMode && segmenter && refFrame) { segmentAt((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height); return; }
+  if (tapMode && refFrame) {
+    if (!segmenter) return; // model belum siap; status sudah memberi tahu
+    segmentAt((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height); return; }
   const y = (e.clientY - r.top) / r.height;
   let best = null, bd = 0.08;
   for (const k of Object.keys(lines)) { const d = Math.abs(lines[k] - y); if (d < bd) { bd = d; best = k; } }
@@ -270,6 +272,7 @@ $('btnStart').addEventListener('click', async () => {
   ['btnLock', 'btnShot', 'btnRef'].forEach(id => $(id).disabled = false);
   $('btnStart').disabled = true;
   resizeOverlay();
+  loadModel().catch(() => {});
   await inspectTrack();
 });
 
@@ -374,6 +377,8 @@ $('btnShot').addEventListener('click', async () => {
     $('shot').replaceChildren(img, Object.assign(document.createElement('p'), { className: 'muted', textContent: info }));
     setRow('last_shot', 'Foto terakhir', info);
     log('Foto diambil', { method, width: img.naturalWidth, height: img.naturalHeight, kb: Math.round(blob.size / 1024), ms: Math.round(ms) });
+    // Foto pertama sesi jadi referensi, lalu user diminta tap toplesnya
+    if (!refFrame) { $('btnRef').click(); askForJarTap(); }
   } catch (err) {
     log('Gagal ambil foto: ' + err.message);
   } finally { $('btnShot').disabled = false; }
@@ -395,7 +400,7 @@ $('btnRef').addEventListener('click', () => {
   const px = sctx.getImageData(0, 0, w, h).data;
   const gray = new Float32Array(w * h);
   for (let i = 0; i < w * h; i++) gray[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
-  refFrame = { gray, w, h };
+  refFrame = { gray, w, h, canvas: s };
   refLevel = lines.level;
   drawOverlay();
   refMask = refMaskRaw = null; $('useMask').checked = false; $('useMask').disabled = true;
@@ -420,36 +425,46 @@ $('useMask').addEventListener('change', () => refFrame && renderEdges());
 function useMaskOn() { return refMask && $('useMask').checked; }
 
 // ---------- ML: MediaPipe Interactive Segmenter (tap sekali pada toples) ----------
-$('btnMl').addEventListener('click', async () => {
+// Model dimuat sekali; dipanggil lebih awal (saat kamera menyala) supaya user tidak menunggu
+let modelPromise = null;
+function loadModel() {
+  if (modelPromise) return modelPromise;
   const st = $('mlStatus');
-  if (!segmenter) {
-    $('btnMl').disabled = true;
-    st.textContent = 'Mengunduh model ML...';
-    const t0 = performance.now();
-    try {
-      const { FilesetResolver, InteractiveSegmenter } = await import('./vendor/mediapipe/vision_bundle.mjs');
-      const fileset = await FilesetResolver.forVisionTasks('./vendor/mediapipe/wasm');
-      const make = delegate => InteractiveSegmenter.createFromOptions(fileset, {
-        baseOptions: { modelAssetPath: './models/magic_touch.tflite', delegate },
-        outputCategoryMask: true, outputConfidenceMasks: false
-      });
-      let delegate = 'GPU';
-      try { segmenter = await make('GPU'); } catch (e) { log('GPU gagal, pakai CPU: ' + e.message); delegate = 'CPU'; segmenter = await make('CPU'); }
-      const ms = Math.round(performance.now() - t0);
-      report.ml = { loadMs: ms, delegate };
-      setRow('ml_load', 'Muat model ML', `${ms} ms (${delegate})`, true);
-      log('Model ML siap', report.ml);
-    } catch (err) {
-      st.textContent = 'Model ML gagal dimuat: ' + err.message;
-      setRow('ml_load', 'Muat model ML', 'gagal: ' + err.message, false);
-      $('btnMl').disabled = false;
-      return;
-    }
-    $('btnMl').disabled = false;
-  }
+  st.textContent = 'Mengunduh model ML...';
+  const t0 = performance.now();
+  modelPromise = (async () => {
+    const { FilesetResolver, InteractiveSegmenter } = await import('./vendor/mediapipe/vision_bundle.mjs');
+    const fileset = await FilesetResolver.forVisionTasks('./vendor/mediapipe/wasm');
+    const make = delegate => InteractiveSegmenter.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: './models/magic_touch.tflite', delegate },
+      outputCategoryMask: true, outputConfidenceMasks: false
+    });
+    let delegate = 'GPU';
+    try { segmenter = await make('GPU'); } catch (e) { log('GPU gagal, pakai CPU: ' + e.message); delegate = 'CPU'; segmenter = await make('CPU'); }
+    const ms = Math.round(performance.now() - t0);
+    report.ml = { loadMs: ms, delegate };
+    setRow('ml_load', 'Muat model ML', `${ms} ms (${delegate})`, true);
+    log('Model ML siap', report.ml);
+    if (!tapMode) st.textContent = 'Model ML siap.';
+    return segmenter;
+  })().catch(err => {
+    modelPromise = null;
+    st.textContent = 'Model ML gagal dimuat: ' + err.message;
+    setRow('ml_load', 'Muat model ML', 'gagal: ' + err.message, false);
+    throw err;
+  });
+  return modelPromise;
+}
+
+async function askForJarTap() {
   tapMode = true;
-  st.textContent = 'Tap bagian tengah toples di preview.';
-});
+  const st = $('mlStatus');
+  if (!segmenter) st.textContent = 'Menyiapkan model ML... setelah itu tap toplesnya.';
+  try { await loadModel(); } catch { tapMode = false; return; }
+  if (tapMode) st.textContent = 'Tap toplesnya di layar.';
+}
+
+$('btnMl').addEventListener('click', askForJarTap);
 
 function segmentAt(sx, sy) {
   tapMode = false;
@@ -457,7 +472,7 @@ function segmentAt(sx, sy) {
   const p = stageToFrame(sx, sy);
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
-  c.getContext('2d').drawImage(ref, 0, 0, w, h);
+  c.getContext('2d').drawImage(refFrame.canvas, 0, 0, w, h);
   const t0 = performance.now();
   let res;
   try { res = segmenter.segment(c, { keypoint: { x: p.x, y: p.y } }); }
